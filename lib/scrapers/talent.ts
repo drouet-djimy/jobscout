@@ -3,6 +3,7 @@ import type { Scraper, ScrapedOffre, ScrapeCriteria, ProgressEvent } from "./bas
 import { htmlToText } from "./base";
 import { detectVie } from "@/lib/vie";
 import { nameToCode } from "@/lib/countries";
+import { searchArea } from "@/lib/geo/zones";
 import {
   parseDocument,
   firstMatchHtml,
@@ -119,8 +120,8 @@ function parseSearchPage(html: string, domain: Domain): Card[] {
   return out;
 }
 
-async function fetchSearchPage(domain: Domain, keywords: string, page: number): Promise<Card[]> {
-  const params = new URLSearchParams({ k: keywords, l: "" });
+async function fetchSearchPage(domain: Domain, keywords: string, page: number, place = ""): Promise<Card[]> {
+  const params = new URLSearchParams({ k: keywords, l: place });
   if (page > 1) params.set("p", String(page));
   const res = await fetch(`https://${domain.host}/jobs?${params}`, { headers: BROWSER_HEADERS });
   if (!res.ok) throw new Error(`Talent.com ${domain.host} HTTP ${res.status}`);
@@ -180,31 +181,43 @@ export const talentScraper: Scraper = {
   async *scrape(criteria: ScrapeCriteria, onEvent: (e: ProgressEvent) => void) {
     onEvent({ kind: "start", source: SOURCE });
 
-    // Sélection des domaines Talent selon les pays cibles du profil.
-    const targetCodes = new Set(
-      criteria.countries.map((c) => nameToCode(c)).filter((c): c is string => !!c)
+    // Sélection des domaines Talent selon les pays cibles du profil : tout le pays
+    // (l vide) pour un pays couvert entièrement, une recherche par ville sinon.
+    // Talent.com cherche autour de la ville avec son propre rayon : l'orchestrateur
+    // écarte ensuite les offres hors du rayon choisi.
+    const { wholeCountries, cities } = searchArea({
+      target_countries: criteria.countries,
+      target_cities: criteria.cities,
+    });
+    const wholeCodes = new Set(
+      wholeCountries.map((c) => nameToCode(c)).filter((c): c is string => !!c)
     );
-    const activeDomains = targetCodes.size
-      ? DOMAINS.filter((d) => d.codes.some((c) => targetCodes.has(c)))
-      : [DOMAINS[0]]; // aucun pays ciblé → France par défaut
-    if (!activeDomains.length) {
+    const searches: { domain: Domain; place: string }[] = [];
+    for (const domain of DOMAINS) {
+      if (domain.codes.some((c) => wholeCodes.has(c))) searches.push({ domain, place: "" });
+      for (const city of cities) {
+        if (domain.codes.includes(city.country_code)) searches.push({ domain, place: city.name });
+      }
+    }
+    if (!wholeCodes.size && !cities.length) searches.push({ domain: DOMAINS[0], place: "" }); // aucun pays ciblé → France par défaut
+    if (!searches.length) {
       onEvent({ kind: "list", source: SOURCE, total: 0 });
       onEvent({ kind: "done", source: SOURCE, seen: 0, ok: 0, failed: 0 });
       return;
     }
 
-    // Budget réparti : ~20 offres par pays, borné par maxOffres global.
-    const max = criteria.maxOffres ?? Math.min(150, activeDomains.length * 20);
-    const perDomain = Math.max(10, Math.floor(max / activeDomains.length));
+    // Budget réparti : ~20 offres par pays ou ville, borné par maxOffres global.
+    const max = criteria.maxOffres ?? Math.min(150, searches.length * 20);
+    const perDomain = Math.max(10, Math.floor(max / searches.length));
     const queries = criteria.sectors.length ? criteria.sectors : [""];
     const seen = new Map<string, Card>();
 
-    for (const domain of activeDomains) {
+    for (const { domain, place } of searches) {
       let domainCount = 0;
       for (const q of queries) {
         for (let page = 1; page <= 2 && domainCount < perDomain; page++) {
           try {
-            const cards = await fetchSearchPage(domain, q, page);
+            const cards = await fetchSearchPage(domain, q, page, place);
             if (!cards.length) break;
             for (const c of cards) {
               if (!seen.has(c.id) && domainCount < perDomain) {

@@ -11,6 +11,7 @@ import type { ProfileFull } from "@/lib/cv/types";
 import { COUNTRY_GROUPS, FRANCOPHONIE } from "@/lib/countries";
 import { SOURCES_META, DEFAULT_SOURCE_IDS } from "@/lib/sources-meta";
 import { EngineNotice } from "@/components/app/engine-notice";
+import { CityPicker } from "@/components/app/city-picker";
 const SOURCES = SOURCES_META;
 
 export function PreferencesForm() {
@@ -29,6 +30,7 @@ export function PreferencesForm() {
     const p: ProfileFull = JSON.parse(raw);
     if (!p.sources_enabled?.length) p.sources_enabled = [...DEFAULT_SOURCE_IDS];
     if (!p.preferred_contracts?.length) p.preferred_contracts = ["cdi", "cdd"];
+    p.target_cities ??= [];
     setProfile(p);
   }, [router]);
 
@@ -67,8 +69,8 @@ export function PreferencesForm() {
       setError("Ajoutez au moins un secteur cible.");
       return;
     }
-    if (profile.target_countries.length === 0) {
-      setError("Sélectionnez au moins un pays.");
+    if (profile.target_countries.length === 0 && profile.target_cities.length === 0) {
+      setError("Sélectionnez au moins un pays ou une ville.");
       return;
     }
     if (profile.sources_enabled.length === 0) {
@@ -207,6 +209,18 @@ export function PreferencesForm() {
             </div>
           ))}
         </div>
+      </Card>
+
+      <Card>
+        <h2 className="text-h3 mb-1">Villes et rayon</h2>
+        <p className="text-small text-textSecondary mb-4">
+          Facultatif. Cherchez autour d'une ville, dans le rayon choisi. Une ville limite la
+          recherche dans son pays à cette zone ; les pays cochés sans ville restent couverts en entier.
+        </p>
+        <CityPicker
+          cities={profile.target_cities}
+          onChange={(target_cities) => update({ target_cities })}
+        />
       </Card>
 
       <Card>

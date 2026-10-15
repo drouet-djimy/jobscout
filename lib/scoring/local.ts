@@ -1,6 +1,7 @@
 import "server-only";
 import type { ProfileFull, Language } from "@/lib/cv/types";
 import { classifyContract, type ContractCategory } from "@/lib/contracts";
+import { searchArea, zoneVerdict } from "@/lib/geo/zones";
 
 export type ScoreResult = {
   score: number;
@@ -114,11 +115,37 @@ function scoreSkills(
   return { score, matched, anchoredMatched };
 }
 
-function scoreCountry(targetCountries: string[], offreCountry: string | null): number {
-  if (!targetCountries.length) return 50;
-  if (!offreCountry) return 50;
-  const targetSet = new Set(targetCountries.map(normalize));
-  return targetSet.has(normalize(offreCountry)) ? 100 : 0;
+/**
+ * Lieu (critère « pays » historique) : pays entiers cochés et villes avec rayon.
+ * Dans le rayon d'une ville 100, juste au-delà 60, nettement hors zone 0 ;
+ * pays couvert entièrement 100, autre pays 0 ; lieu inconnu ou aucune cible 50.
+ */
+function scoreLocation(
+  profile: Pick<ProfileFull, "target_countries" | "target_cities">,
+  offre: Pick<ScoringInput, "country" | "lat" | "lon">
+): { score: number; note: string | null } {
+  const area = searchArea(profile);
+  const { verdict, nearest } = zoneVerdict(area, offre);
+  const where = nearest
+    ? nearest.km < 1 ? nearest.city.name : `${Math.round(nearest.km)} km de ${nearest.city.name}`
+    : "";
+  switch (verdict) {
+    case "inside":
+      return { score: 100, note: `à ${where}` };
+    case "near":
+      return { score: 60, note: `à ${where}, juste hors rayon` };
+    case "outside":
+      return { score: 0, note: `hors zone (${where})` };
+    case "unknown":
+      return { score: 50, note: null };
+    case "no-zone": {
+      if (!area.countries.length || !offre.country) return { score: 50, note: null };
+      const whole = new Set(area.wholeCountries.map(normalize));
+      return whole.has(normalize(offre.country))
+        ? { score: 100, note: "pays OK" }
+        : { score: 0, note: "hors pays cibles" };
+    }
+  }
 }
 
 // ----------------------------------------------------------------------------
@@ -257,6 +284,9 @@ export type ScoringInput = {
   title: string;
   company: string;
   country: string | null;
+  /** Coordonnées du lieu de l'offre, si connues (sert au rayon autour des villes cibles). */
+  lat?: number | null;
+  lon?: number | null;
   description_text: string;
   contract_type?: string | null;
 };
@@ -267,7 +297,8 @@ export function scoreOffreLocal(
 ): ScoreResult {
   const sector = scoreSector(profile.sectors, offre.title, offre.description_text);
   const skills = scoreSkills(profile, offre.description_text);
-  const country = scoreCountry(profile.target_countries, offre.country);
+  const location = scoreLocation(profile, offre);
+  const country = location.score;
   const language = scoreLanguage(profile.languages, offre.title, offre.description_text);
   const contract = scoreContract(profile.preferred_contracts, offre);
   const duration = scoreDuration(contract.category, offre.description_text);
@@ -296,8 +327,7 @@ export function scoreOffreLocal(
   } else if (skills.matched.length) {
     parts.push(`skills : ${skills.matched.slice(0, 3).join(", ")}`);
   }
-  if (country === 100) parts.push("pays OK");
-  else if (country === 0) parts.push("hors pays cibles");
+  if (location.note) parts.push(location.note);
   if (language.matched) parts.push(`langue ${language.offerLang.toUpperCase()} OK`);
   if (duration.months && duration.score >= 60)
     parts.push(`durée ${duration.months} mois`);

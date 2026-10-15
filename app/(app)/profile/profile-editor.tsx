@@ -25,6 +25,7 @@ import { cn } from "@/lib/utils";
 import { COUNTRY_GROUPS } from "@/lib/countries";
 import { SOURCES_META } from "@/lib/sources-meta";
 import { EngineNotice } from "@/components/app/engine-notice";
+import { CityPicker } from "@/components/app/city-picker";
 import type { ProfileFull, Experience, Education, Skill, Language } from "@/lib/cv/types";
 
 const SOURCES = SOURCES_META;
@@ -254,7 +255,7 @@ function IdentityCard({
 }
 
 // ============================================================
-// Recherche (sectors / countries / sources)
+// Recherche (sectors / countries / cities / sources)
 // ============================================================
 
 function SearchCard({
@@ -359,6 +360,19 @@ function SearchCard({
           ))}
         </div>
       )}
+
+      <p className="text-caption uppercase text-textSecondary mb-1">
+        Villes et rayon ({profile.target_cities?.length ?? 0})
+      </p>
+      <p className="text-small text-textSecondary mb-2">
+        Une ville limite la recherche dans son pays au rayon choisi ; les pays sans ville restent couverts en entier.
+      </p>
+      <div className="mb-4">
+        <CityPicker
+          cities={profile.target_cities ?? []}
+          onChange={(target_cities) => update({ target_cities })}
+        />
+      </div>
 
       <p className="text-caption uppercase text-textSecondary mb-2">Contrats recherchés</p>
       <div className="flex flex-wrap gap-1.5 mb-4">

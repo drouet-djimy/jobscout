@@ -2,7 +2,8 @@ import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getDb } from "@/lib/db";
 import { dbPath } from "@/lib/paths";
-import { offresCounts, searchOffres, setOffreScore, upsertOffreFromSource, type ScrapedOffre } from "@/lib/db/offres";
+import { offresCounts, postingKey, searchOffres, setOffreScore, upsertOffreFromSource, type ScrapedOffre } from "@/lib/db/offres";
+import { createCandidature, updateCandidature } from "@/lib/db/candidatures";
 
 /**
  * searchOffres (liste /offres et /api/offres/search) : pagination stable, filtres,
@@ -41,6 +42,7 @@ function add(over: Partial<ScrapedOffre> = {}, score = 50): number {
 
 beforeEach(() => {
   const db = getDb();
+  db.exec("DELETE FROM candidatures");
   db.exec("DELETE FROM documents");
   db.exec("DELETE FROM offres");
 });
@@ -136,6 +138,52 @@ describe("cache de searchOffres", () => {
     expect(searchOffres().offers[0].has_cv).toBe(false);
     getDb().prepare("INSERT INTO documents (type, offre_id, file_path, format) VALUES ('cv', ?, 'cv.pdf', 'pdf')").run(id);
     expect(searchOffres().offers[0].has_cv).toBe(true);
+  });
+
+  it("signale une offre déjà dans le suivi, et suit le changement de statut", () => {
+    const id = add({ title: "Comptable (H/F)", company: "Cabinet Rhône" });
+    const other = add({ title: "Juriste", company: "Cabinet Rhône" });
+    expect(searchOffres().offers.every((o) => o.application === null)).toBe(true);
+    const cand = createCandidature({ offre_id: id, status: "en_cours", applied_at: "2026-10-01 09:00:00" });
+    const byId = () => new Map(searchOffres().offers.map((o) => [o.id, o.application]));
+    expect(byId().get(id)).toEqual({ status: "en_cours", applied_at: "2026-10-01 09:00:00", match: "same" });
+    expect(byId().get(other)).toBeNull();
+    updateCandidature(cand, { status: "envoyee" });
+    expect(byId().get(id)?.status).toBe("envoyee");
+  });
+
+  it("signale la même annonce publiée sur un autre site ou importée (entreprise + intitulé)", () => {
+    const tracked = add({ title: "Comptable (H/F)", company: "Cabinet Rhône" });
+    const dup = add({ title: "COMPTABLE F/H", company: "Cabinet Rhône" });
+    const imported = add({ title: "Contrôleur de gestion", company: "Acme" });
+    const sameTitleNoCompany = add({ title: "Comptable (H/F)", company: "" });
+    createCandidature({ offre_id: tracked, status: "envoyee" });
+    createCandidature({ offre_id: null, status: "refusee", ext_company: "ACME", ext_title: "Contrôleur de gestion" });
+    const byId = new Map(searchOffres().offers.map((o) => [o.id, o.application]));
+    expect(byId.get(tracked)?.match).toBe("same");
+    expect(byId.get(dup)).toMatchObject({ status: "envoyee", match: "similar" });
+    expect(byId.get(imported)).toMatchObject({ status: "refusee", match: "similar" });
+    expect(byId.get(sameTitleNoCompany)).toBeNull();
+  });
+
+  it("masque les offres suivies (et les annonces similaires) sur demande", () => {
+    const tracked = add({ title: "Comptable (H/F)", company: "Cabinet Rhône" }, 90);
+    add({ title: "Comptable F/H", company: "Cabinet Rhône" }, 80); // annonce similaire, masquée aussi
+    const free = add({ title: "Juriste", company: "Cabinet Rhône" }, 70);
+    createCandidature({ offre_id: tracked, status: "envoyee" });
+    const all = searchOffres();
+    expect(all.total).toBe(3);
+    expect(all.facets.tracked).toBe(2);
+    const hidden = searchOffres({ hideTracked: true });
+    expect(hidden.offers.map((o) => o.id)).toEqual([free]);
+    expect(hidden.total).toBe(1);
+    expect(hidden.facets.tracked).toBe(2);
+  });
+
+  it("postingKey ignore casse, accents, ponctuation et mention de genre", () => {
+    expect(postingKey("Société Générale", "Analyste (H/F)")).toBe(postingKey("SOCIETE GENERALE", "Analyste - F/H"));
+    expect(postingKey("Acme", "Analyste")).not.toBe(postingKey("Acme", "Analyste senior"));
+    expect(postingKey(null, "Analyste")).toBeNull();
   });
 
   it("voit une écriture faite par une autre connexion (script, autre processus)", () => {

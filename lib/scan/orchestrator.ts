@@ -5,7 +5,9 @@ import { upsertOffreFromSource, setOffreScore } from "@/lib/db/offres";
 import { scoreOffresLocal } from "@/lib/scoring/local";
 import { getProfile } from "@/lib/db/queries";
 import { getDb } from "@/lib/db";
-import type { ProgressEvent } from "@/lib/scrapers/base";
+import type { ProgressEvent, ScrapedOffre } from "@/lib/scrapers/base";
+import { cityLabel, searchArea, zoneVerdict, type SearchArea } from "@/lib/geo/zones";
+import { geocodeLocation } from "@/lib/geo/geocode";
 
 export type OrchestratorEvent =
   | ProgressEvent
@@ -56,16 +58,24 @@ export async function* runScan(
     db.prepare("UPDATE scan_runs SET log = ? WHERE id = ?").run(JSON.stringify(log), runId);
 
   let totalInserted = 0;
+  // Pays entiers + villes avec rayon. Une ville restreint son pays à sa zone.
+  const area = searchArea(profile);
+  if (area.cities.length) {
+    const line = `Zones : ${area.cities.map(cityLabel).join(", ")}${area.wholeCountries.length ? ` · pays entiers : ${area.wholeCountries.join(", ")}` : ""}`;
+    log.push(line);
+    onLog(line);
+  }
 
   for (const scraper of scrapers) {
     let seen = 0;
     let okCount = 0;
     let failCount = 0;
+    let outOfZone = 0;
     const buffer: { id: number; offre: any }[] = [];
     const pendingScoring: OrchestratorEvent[] = [];
 
     try {
-      const criteria = { sectors: profile.sectors, countries: profile.target_countries };
+      const criteria = { sectors: profile.sectors, countries: area.countries, cities: area.cities };
       const progressQueue: ProgressEvent[] = [];
       const onEvent = (e: ProgressEvent) => progressQueue.push(e);
 
@@ -78,6 +88,10 @@ export async function* runScan(
           yield ev;
         }
 
+        if (!(await keepInArea(area, offre))) {
+          outOfZone++;
+          continue;
+        }
         const id = upsertOffreFromSource(scraper.name, offre);
         if (offre.description_status === "ok") {
           totalInserted++;
@@ -109,7 +123,7 @@ export async function* runScan(
       log.push(`[${scraper.name}] erreur fatale: ${msg}`);
       yield { kind: "error", source: scraper.name, message: msg };
     }
-    const summary = `[${scraper.name}] ${seen || okCount + failCount} vues, ${okCount} insérées, ${failCount} échecs`;
+    const summary = `[${scraper.name}] ${seen || okCount + failCount} vues, ${okCount} insérées, ${failCount} échecs${outOfZone ? `, ${outOfZone} hors zone` : ""}`;
     log.push(summary);
     onLog(summary);
     flush();
@@ -117,6 +131,24 @@ export async function* runScan(
 
   db.prepare("UPDATE scan_runs SET status = 'done', finished_at = datetime('now') WHERE id = ?").run(runId);
   yield { kind: "global-done", total_inserted: totalInserted };
+}
+
+/**
+ * Villes ciblées : situe l'offre (coordonnées de la source, sinon géocodage de
+ * son lieu, mis en cache) et l'écarte si elle est nettement hors zone dans un
+ * pays restreint à ses villes. Lieu inconnu ou introuvable : gardée, le score
+ * reste neutre. Sans ville ciblée : aucun géocodage, aucune requête en plus.
+ */
+async function keepInArea(area: SearchArea, offre: ScrapedOffre): Promise<boolean> {
+  if (!area.cities.length) return true;
+  if (offre.lat == null || offre.lon == null) {
+    const point = await geocodeLocation(offre.location, offre.country);
+    if (point) {
+      offre.lat = point.lat;
+      offre.lon = point.lon;
+    }
+  }
+  return zoneVerdict(area, offre).verdict !== "outside";
 }
 
 async function scoreBatch(
@@ -128,6 +160,8 @@ async function scoreBatch(
     title: b.offre.title,
     company: b.offre.company,
     country: b.offre.country,
+    lat: b.offre.lat ?? null,
+    lon: b.offre.lon ?? null,
     description_text: b.offre.description_text,
     contract_type: b.offre.contract_type ?? null,
   }));

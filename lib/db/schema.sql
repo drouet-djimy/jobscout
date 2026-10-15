@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS profile (
   raw_cv_text TEXT,
   sectors TEXT NOT NULL DEFAULT '[]',
   target_countries TEXT NOT NULL DEFAULT '[]',
+  target_cities TEXT NOT NULL DEFAULT '[]',
   sources_enabled TEXT NOT NULL DEFAULT '[]',
   preferred_contracts TEXT NOT NULL DEFAULT '["cdi","cdd"]',
   extraction_confidence INTEGER DEFAULT 0,
@@ -76,6 +77,8 @@ CREATE TABLE IF NOT EXISTS offres (
   company TEXT NOT NULL,
   country TEXT,
   location TEXT,
+  lat REAL,
+  lon REAL,
   contract_type TEXT,
   salary TEXT,
   description_html TEXT NOT NULL,
@@ -133,6 +136,16 @@ CREATE TABLE IF NOT EXISTS candidatures (
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT
+);
+
+-- Cache du géocodage (villes cibles, lieux des offres) : un lieu n'est demandé
+-- qu'une fois au service de géocodage. lat/lon NULL = lieu introuvable.
+CREATE TABLE IF NOT EXISTS geocache (
+  key TEXT PRIMARY KEY,
+  lat REAL,
+  lon REAL,
+  extra TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS scan_runs (

@@ -102,6 +102,7 @@ export function buildProfileFromExtraction(
     raw_cv_text: rawCvText,
     sectors: [],
     target_countries: [],
+    target_cities: [],
     sources_enabled: [],
     // Même défaut que le schéma zod, la colonne SQL et l'écran de préférences.
     preferred_contracts: ["cdi", "cdd"],

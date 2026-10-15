@@ -3,6 +3,7 @@ import type { Scraper, ScrapedOffre, ScrapeCriteria, ProgressEvent } from "./bas
 import { htmlToText } from "./base";
 import { detectVie } from "@/lib/vie";
 import { normalizeCountryName, nameToCode } from "@/lib/countries";
+import { haversineKm, searchArea, type TargetCity } from "@/lib/geo/zones";
 
 /**
  * Welcome to the Jungle via son index de recherche public (Algolia) — le même
@@ -38,6 +39,7 @@ type Hit = {
   salary_period?: string | null;
   organization?: { name?: string | null; slug?: string | null } | null;
   offices?: { city?: string | null; country?: string | null; country_code?: string | null }[] | null;
+  _geoloc?: { lat?: number; lng?: number }[] | { lat?: number; lng?: number } | null;
   summary?: unknown;
   key_missions?: unknown;
   profile?: unknown;
@@ -87,11 +89,52 @@ function salaryLabel(h: Hit): string | null {
   return `${range} ${cur} ${per}`;
 }
 
-function toScraped(h: Hit): ScrapedOffre | null {
+type Office = NonNullable<Hit["offices"]>[number];
+type Geo = { lat?: number; lng?: number };
+
+const cityKey = (s: string | null | undefined) =>
+  (s ?? "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z]+/g, " ").trim();
+
+/**
+ * Offre multi-sites (ex. Paris + Lyon) : `_geoloc` et `offices` ne sont PAS dans
+ * le même ordre (vérifié octobre 2026), et les bureaux n'ont pas de coordonnées.
+ * Coordonnées : le point le plus proche d'une ville cible. Lieu affiché : le
+ * bureau qui porte le nom d'une ville cible, sinon toutes les villes de l'offre.
+ */
+function placeOf(h: Hit, cities: TargetCity[]): { office: Office | null; label: string | null; geo: Geo | null } {
+  const offices = h.offices ?? [];
+  const geos: Geo[] = Array.isArray(h._geoloc) ? h._geoloc : h._geoloc ? [h._geoloc] : [];
+  if (offices.length < 2 && geos.length < 2) {
+    return { office: offices[0] ?? null, label: offices[0]?.city ?? null, geo: geos[0] ?? null };
+  }
+  // Sans ville cible, impossible de savoir quel point va avec quel bureau : pas de coordonnées.
+  let geo: Geo | null = geos.length === 1 ? geos[0] : null;
+  let bestKm = Infinity;
+  for (const g of cities.length ? geos : []) {
+    if (typeof g?.lat !== "number" || typeof g?.lng !== "number") continue;
+    for (const c of cities) {
+      const km = haversineKm(c, { lat: g.lat, lon: g.lng }) - c.radius_km;
+      if (km < bestKm) {
+        bestKm = km;
+        geo = g;
+      }
+    }
+  }
+  const wanted = new Set(cities.map((c) => cityKey(c.name)));
+  const match = offices.find((o) => wanted.has(cityKey(o.city)));
+  const names = Array.from(new Set(offices.map((o) => o.city).filter((c): c is string => !!c)));
+  return {
+    office: match ?? offices[0] ?? null,
+    label: match?.city ?? (names.length ? names.join(" · ") : null),
+    geo,
+  };
+}
+
+function toScraped(h: Hit, cities: TargetCity[] = []): ScrapedOffre | null {
   const title = (h.name ?? "").trim();
   const orgSlug = h.organization?.slug ?? "";
   if (!title || !h.slug || !orgSlug) return null;
-  const office = h.offices?.[0] ?? null;
+  const { office, label, geo } = placeOf(h, cities);
   const country =
     normalizeCountryName(office?.country ?? null) ??
     (office?.country_code ? normalizeCountryName(office.country_code) : null);
@@ -112,7 +155,9 @@ function toScraped(h: Hit): ScrapedOffre | null {
     title,
     company: (h.organization?.name ?? "").trim(),
     country,
-    location: office?.city ?? null,
+    location: label,
+    lat: typeof geo?.lat === "number" ? geo.lat : null,
+    lon: typeof geo?.lng === "number" ? geo.lng : null,
     contract_type,
     salary: salaryLabel(h),
     description_html,
@@ -124,8 +169,15 @@ function toScraped(h: Hit): ScrapedOffre | null {
   };
 }
 
-async function searchPage(query: string, page: number): Promise<{ hits: Hit[]; nbPages: number }> {
+/** Recherche autour d'un point (rayon en km), via la recherche géographique d'Algolia. */
+type Around = { lat: number; lon: number; radiusKm: number };
+
+async function searchPage(query: string, page: number, around?: Around): Promise<{ hits: Hit[]; nbPages: number }> {
   const params = new URLSearchParams({ query, hitsPerPage: String(HITS_PER_PAGE), page: String(page) });
+  if (around) {
+    params.set("aroundLatLng", `${around.lat},${around.lon}`);
+    params.set("aroundRadius", String(Math.round(around.radiusKm * 1000)));
+  }
   const res = await fetch(ALGOLIA_URL, {
     method: "POST",
     headers: {
@@ -149,32 +201,52 @@ export const wttjScraper: Scraper = {
   async *scrape(criteria: ScrapeCriteria, onEvent: (e: ProgressEvent) => void) {
     onEvent({ kind: "start", source: SOURCE });
     const max = criteria.maxOffres ?? 200;
+    const { wholeCountries, cities } = searchArea({
+      target_countries: criteria.countries,
+      target_cities: criteria.cities,
+    });
     const targetCodes = new Set(
-      criteria.countries.map((c) => nameToCode(c)).filter((c): c is string => !!c)
+      wholeCountries.map((c) => nameToCode(c)).filter((c): c is string => !!c)
     );
     const queries = criteria.sectors.length ? criteria.sectors : [""];
 
-    // 1. Collecte via l'index : une recherche par secteur cible, 2 pages max.
+    // Une recherche géographique par ville cible ; une recherche générale (filtrée
+    // ensuite par pays) seulement s'il reste des pays couverts entièrement, ou
+    // s'il n'y a ni ville ni pays.
+    const arounds: (Around | undefined)[] = cities.map((c) => ({ lat: c.lat, lon: c.lon, radiusKm: c.radius_km }));
+    if (wholeCountries.length || !cities.length) arounds.push(undefined);
+
+    // 1. Collecte via l'index : une recherche par secteur cible et par zone, 2 pages max.
     const seen = new Map<string, Hit>();
+    const inZone = new Set<string>();
     let apiError: string | null = null;
-    for (const q of queries) {
-      for (let page = 0; page < PAGES_PER_QUERY; page++) {
-        try {
-          const { hits, nbPages } = await searchPage(q, page);
-          for (const h of hits) if (h?.objectID && !seen.has(h.objectID)) seen.set(h.objectID, h);
-          if (page + 1 >= nbPages) break;
-        } catch (e) {
-          apiError = e instanceof Error ? e.message : String(e);
-          break;
+    for (const around of arounds) {
+      for (const q of queries) {
+        for (let page = 0; page < PAGES_PER_QUERY; page++) {
+          try {
+            const { hits, nbPages } = await searchPage(q, page, around);
+            for (const h of hits) {
+              if (!h?.objectID) continue;
+              if (around) inZone.add(h.objectID);
+              if (!seen.has(h.objectID)) seen.set(h.objectID, h);
+            }
+            if (page + 1 >= nbPages) break;
+          } catch (e) {
+            apiError = e instanceof Error ? e.message : String(e);
+            break;
+          }
         }
+        if (apiError) break;
       }
       if (apiError) break;
     }
     if (apiError && seen.size === 0) throw new Error(apiError);
 
     // 2. Filtre pays (si des pays cibles sont définis) + tri par date de publication.
+    // Les résultats d'une recherche par ville sont déjà dans la zone.
     const filtered = Array.from(seen.values()).filter((h) => {
-      if (!targetCodes.size) return true;
+      if (inZone.has(h.objectID)) return true;
+      if (!targetCodes.size) return !cities.length || wholeCountries.length > 0;
       const codes = (h.offices ?? []).map((o) => (o.country_code ?? "").toUpperCase()).filter(Boolean);
       if (!codes.length) return true; // lieu inconnu : on laisse le scoring décider
       return codes.some((c) => targetCodes.has(c));
@@ -187,7 +259,7 @@ export const wttjScraper: Scraper = {
     let ok = 0;
     let failed = 0;
     for (let i = 0; i < picked.length; i++) {
-      const offre = toScraped(picked[i]);
+      const offre = toScraped(picked[i], cities);
       if (offre) {
         yield offre;
         ok++;

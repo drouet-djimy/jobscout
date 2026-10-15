@@ -15,6 +15,8 @@ export type OffreRow = {
   company: string;
   country: string | null;
   location: string | null;
+  lat: number | null;
+  lon: number | null;
   contract_type: string | null;
   salary: string | null;
   description_html: string;
@@ -44,6 +46,18 @@ export type OffreFiltered = OffreRow & {
   contract_category: ContractCategory;
 };
 
+/**
+ * Candidature déjà enregistrée pour cette offre (la plus récente), pour ne pas
+ * postuler deux fois. `same` : candidature liée à cette offre ; `similar` : même
+ * entreprise et même intitulé, sur une autre offre (même annonce publiée sur
+ * plusieurs sites) ou dans une candidature importée.
+ */
+export type OffreApplication = {
+  status: string;
+  applied_at: string;
+  match: "same" | "similar";
+};
+
 export type OffreSummary = Pick<
   OffreFiltered,
   "id" | "source" | "url" | "title" | "company" | "country" | "location" |
@@ -52,6 +66,7 @@ export type OffreSummary = Pick<
 > & {
   description_text: string;
   score_reason: string | null;
+  application: OffreApplication | null;
 };
 
 export type OffersSort = "smart" | "newest" | "oldest" | "score";
@@ -66,6 +81,8 @@ export type OffersSearch = {
     sources: string[];
     contractCounts: Record<ContractCategory, number>;
     hasVie: boolean;
+    /** Offres déjà dans le suivi (même offre ou annonce similaire) : compteur du filtre « Masquer ». */
+    tracked: number;
   };
 };
 
@@ -134,6 +151,52 @@ type CacheRow = Pick<
   "contract_type" | "description_status" | "posted_at" | "score" | "is_vie"
 > & { head: string | null; excerpt: string | null; score_breakdown: string | null; has_cv: number; has_lm: number };
 
+/**
+ * Clé « même annonce » : entreprise + intitulé sans accents, ponctuation ni
+ * mention de genre (« Comptable (H/F) » = « COMPTABLE F/H »). Null si l'un des
+ * deux manque : sans entreprise, deux « Comptable » ne sont pas la même annonce.
+ */
+export function postingKey(company: string | null | undefined, title: string | null | undefined): string | null {
+  const clean = (value: string) =>
+    normalizeSearch(value)
+      .replace(/\b(?:h|f|m|w|x|d)(?:\s*\/\s*(?:h|f|m|w|x|d))+\b/g, " ")
+      .replace(/[^\p{L}\p{N}]+/gu, " ")
+      .trim();
+  const c = clean(company ?? "");
+  const t = clean(title ?? "");
+  return c && t ? `${c}|${t}` : null;
+}
+
+type Applications = { byOffre: Map<number, OffreApplication>; byPosting: Map<string, OffreApplication> };
+
+/** Candidatures déjà enregistrées : par offre, et par entreprise + intitulé (voir postingKey). */
+function loadApplications(): Applications {
+  // Plus récente d'abord : la première vue pour une offre ou une clé l'emporte.
+  const rows = getDb().prepare(`
+    SELECT c.offre_id, c.status, c.applied_at,
+      COALESCE(o.company, c.ext_company) AS company, COALESCE(o.title, c.ext_title) AS title
+    FROM candidatures c LEFT JOIN offres o ON o.id = c.offre_id
+    ORDER BY c.applied_at DESC, c.id DESC
+  `).all() as { offre_id: number | null; status: string; applied_at: string; company: string | null; title: string | null }[];
+  const byOffre = new Map<number, OffreApplication>();
+  const byPosting = new Map<string, OffreApplication>();
+  for (const row of rows) {
+    if (row.offre_id != null && !byOffre.has(row.offre_id)) {
+      byOffre.set(row.offre_id, { status: row.status, applied_at: row.applied_at, match: "same" });
+    }
+    const key = postingKey(row.company, row.title);
+    if (key && !byPosting.has(key)) byPosting.set(key, { status: row.status, applied_at: row.applied_at, match: "similar" });
+  }
+  return { byOffre, byPosting };
+}
+
+function applicationFor(applications: Applications, offer: Pick<CacheRow, "id" | "company" | "title">): OffreApplication | null {
+  const same = applications.byOffre.get(offer.id);
+  if (same) return same;
+  const key = postingKey(offer.company, offer.title);
+  return (key && applications.byPosting.get(key)) || null;
+}
+
 function buildOffresCache(fingerprint: string): OffresCache {
   // La description entière ne remonte pas : 4 000 caractères suffisent à classer le
   // contrat (detectVie en lit 4 000, classifyContract 1 500 ; résultat identique sur
@@ -153,7 +216,11 @@ function buildOffresCache(fingerprint: string): OffresCache {
   const sources = new Set<string>();
   const byId = new Map<number, CachedOffre>();
   const smart: CachedOffre[] = [];
+  const applications = loadApplications();
+  let tracked = 0;
   for (const row of rows) {
+    const application = applicationFor(applications, row);
+    if (application) tracked++;
     const contract_category = classifyContract({ ...row, description_text: row.head ?? "" });
     contractCounts[contract_category]++;
     if (row.country) countries.add(row.country);
@@ -163,7 +230,7 @@ function buildOffresCache(fingerprint: string): OffresCache {
       company: row.company, country: row.country, location: row.location,
       posted_at: row.posted_at, score: row.score, is_vie: row.is_vie,
       description_status: row.description_status, contract_category,
-      has_cv: !!row.has_cv, has_lm: !!row.has_lm,
+      has_cv: !!row.has_cv, has_lm: !!row.has_lm, application,
       // substr() compte des caractères, slice() des unités UTF-16 (émojis) : on
       // recoupe pour rendre exactement l’extrait d’avant.
       excerpt: (row.excerpt ?? "").slice(0, 1000), score_breakdown: row.score_breakdown,
@@ -179,6 +246,7 @@ function buildOffresCache(fingerprint: string): OffresCache {
       sources: [...sources].sort(),
       contractCounts,
       hasVie: contractCounts.vie > 0,
+      tracked,
     },
   };
 }
@@ -231,6 +299,8 @@ export function searchOffres(opts: {
   minScore?: boolean | number;
   /** Raccourci de ?vie=1 : même règle que la puce contrat « V.I.E » (contract_category). */
   vieOnly?: boolean;
+  /** Masque les offres déjà dans le suivi des candidatures (même offre ou annonce similaire). */
+  hideTracked?: boolean;
   sortBy?: OffersSort;
   page?: number;
 } = {}): OffersSearch {
@@ -246,6 +316,7 @@ export function searchOffres(opts: {
     if (contracts.size && !contracts.has(row.contract_category)) return false;
     if (minScore > 0 && (row.score ?? 0) < minScore) return false;
     if (opts.vieOnly && row.contract_category !== "vie") return false;
+    if (opts.hideTracked && row.application) return false;
     return true;
   });
 
@@ -271,6 +342,7 @@ export function searchOffres(opts: {
       score_reason: parseJson<{ reason?: string } | null>(row.score_breakdown, null)?.reason ?? null,
       contract_category: row.contract_category,
       has_cv: row.has_cv, has_lm: row.has_lm,
+      application: row.application,
     })),
     total: filtered.length,
     pageSize: OFFER_PAGE_SIZE,
@@ -307,9 +379,9 @@ export function fixMojibake(s: string | null): string | null {
 export function upsertOffreFromSource(source: string, o: ScrapedOffre): number {
   const db = getDb();
   const stmt = db.prepare(`
-    INSERT INTO offres (source, source_id, url, title, company, country, location, contract_type, salary,
+    INSERT INTO offres (source, source_id, url, title, company, country, location, lat, lon, contract_type, salary,
       description_html, description_text, description_status, posted_at, is_vie, raw_payload, scrape_errors)
-    VALUES (@source, @source_id, @url, @title, @company, @country, @location, @contract_type, @salary,
+    VALUES (@source, @source_id, @url, @title, @company, @country, @location, @lat, @lon, @contract_type, @salary,
       @description_html, @description_text, @description_status, @posted_at, @is_vie, @raw_payload, @scrape_errors)
     ON CONFLICT(source, source_id) DO UPDATE SET
       url = excluded.url,
@@ -317,6 +389,9 @@ export function upsertOffreFromSource(source: string, o: ScrapedOffre): number {
       company = excluded.company,
       country = excluded.country,
       location = excluded.location,
+      -- Coordonnées : un nouveau passage sans géocodage (aucune ville cible) garde les précédentes.
+      lat = CASE WHEN excluded.lat IS NULL THEN offres.lat ELSE excluded.lat END,
+      lon = CASE WHEN excluded.lat IS NULL THEN offres.lon ELSE excluded.lon END,
       contract_type = excluded.contract_type,
       salary = excluded.salary,
       description_html = excluded.description_html,
@@ -336,6 +411,8 @@ export function upsertOffreFromSource(source: string, o: ScrapedOffre): number {
     company: fixMojibake(o.company) ?? o.company,
     country: fixMojibake(o.country),
     location: fixMojibake(o.location),
+    lat: o.lat ?? null,
+    lon: o.lon ?? null,
     contract_type: fixMojibake(o.contract_type),
     salary: fixMojibake(o.salary),
     description_html: fixMojibake(o.description_html) ?? o.description_html,

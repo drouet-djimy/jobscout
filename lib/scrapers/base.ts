@@ -1,5 +1,6 @@
 import "server-only";
 import type { Browser, BrowserContext } from "playwright";
+import type { TargetCity } from "@/lib/cv/types";
 import {
   applyBrowsersPath,
   isEngineInstalled,
@@ -13,6 +14,9 @@ export type ScrapedOffre = {
   company: string;
   country: string | null;
   location: string | null;
+  /** Coordonnées du lieu, quand la source les fournit (sinon géocodées au scan si des villes sont ciblées). */
+  lat?: number | null;
+  lon?: number | null;
   contract_type: string | null;
   salary: string | null;
   description_html: string;
@@ -26,7 +30,10 @@ export type ScrapedOffre = {
 
 export type ScrapeCriteria = {
   sectors: string[];
+  /** Tous les pays concernés : pays cochés + pays des villes cibles (voir searchArea). */
   countries: string[];
+  /** Villes cibles avec leur rayon. Une ville restreint son pays à sa zone. */
+  cities?: TargetCity[];
   maxOffres?: number;
 };
 

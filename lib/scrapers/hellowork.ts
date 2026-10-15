@@ -2,6 +2,7 @@ import "server-only";
 import type { Scraper, ScrapedOffre, ScrapeCriteria, ProgressEvent } from "./base";
 import { htmlToText } from "./base";
 import { detectVie } from "@/lib/vie";
+import { citiesIn } from "@/lib/geo/zones";
 import {
   parseDocument,
   firstMatchHtml,
@@ -87,8 +88,12 @@ function parseSearchPage(html: string): Card[] {
   return cards;
 }
 
-async function fetchSearchPage(keywords: string, page: number): Promise<Card[]> {
-  const params = new URLSearchParams({ k: keywords, l: "France" });
+/** Lieu de recherche : `l` (ville ou « France ») et `ray`, le rayon en km autour de la ville. */
+type Where = { l: string; ray?: number };
+
+async function fetchSearchPage(keywords: string, page: number, where: Where): Promise<Card[]> {
+  const params = new URLSearchParams({ k: keywords, l: where.l });
+  if (where.ray) params.set("ray", String(where.ray));
   if (page > 1) params.set("p", String(page));
   const res = await fetch(`${SEARCH_URL}?${params}`, { headers: BROWSER_HEADERS });
   if (!res.ok) throw new Error(`HelloWork HTTP ${res.status}`);
@@ -162,12 +167,26 @@ export const helloworkScraper: Scraper = {
     const queries = criteria.sectors.length ? criteria.sectors : [""];
     const seen = new Map<string, Card>();
 
-    for (const q of queries) {
-      for (let page = 1; page <= 3 && seen.size < max; page++) {
+    // Villes françaises ciblées : une recherche par ville et rayon (HelloWork élargit
+    // par défaut à 20 km). Sans ville en France : toute la France.
+    const frCities = citiesIn(criteria.cities ?? [], "FR");
+    const places: Where[] = frCities.length
+      ? frCities.map((c) => ({ l: c.name, ray: c.radius_km }))
+      : [{ l: "France" }];
+    const perPlace = Math.max(10, Math.ceil(max / places.length));
+    const searches = places.flatMap((where) => queries.map((q) => ({ q, where })));
+    const placeCount = new Map<Where, number>();
+
+    for (const { q, where } of searches) {
+      for (let page = 1; page <= 3 && seen.size < max && (placeCount.get(where) ?? 0) < perPlace; page++) {
         try {
-          const cards = await fetchSearchPage(q, page);
+          const cards = await fetchSearchPage(q, page, where);
           if (!cards.length) break;
-          for (const c of cards) if (!seen.has(c.id)) seen.set(c.id, c);
+          for (const c of cards) {
+            if (seen.has(c.id)) continue;
+            seen.set(c.id, c);
+            placeCount.set(where, (placeCount.get(where) ?? 0) + 1);
+          }
           if (cards.length < 10) break;
           await sleep(1200);
         } catch {

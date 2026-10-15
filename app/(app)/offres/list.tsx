@@ -3,11 +3,11 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { ArrowRight, ArrowUpRight, Briefcase, CalendarDays, ChevronDown, MapPin, RotateCcw, Search, SlidersHorizontal } from "lucide-react";
+import { ArrowRight, ArrowUpRight, Briefcase, CalendarDays, ChevronDown, CircleAlert, MapPin, RotateCcw, Search, SlidersHorizontal } from "lucide-react";
 import { Chip } from "@/components/ui/chip";
-import { Badge } from "@/components/ui/badge";
+import { Badge, type BadgeVariant } from "@/components/ui/badge";
 import { cn, formatRelativeDate, scoreColor } from "@/lib/utils";
-import type { OffreSummary, OffersSearch, OffersSort } from "@/lib/db/offres";
+import type { OffreApplication, OffreSummary, OffersSearch, OffersSort } from "@/lib/db/offres";
 import { CONTRACT_LABELS, CONTRACT_ORDER, type ContractCategory } from "@/lib/contracts";
 import { SOURCES_META } from "@/lib/sources-meta";
 
@@ -26,6 +26,30 @@ function resultLabel(total: number, filtered: boolean): string {
     return total === 1 ? "1 offre correspond à vos critères" : `${numberFormat.format(total)} offres correspondent à vos critères`;
   }
   return total <= 1 ? `${total} offre à explorer` : `${numberFormat.format(total)} offres à explorer`;
+}
+
+// Statuts de la page Candidatures, formulés du point de vue de l'offre.
+const APPLICATION_META: Record<string, { label: string; variant: BadgeVariant }> = {
+  en_cours: { label: "Candidature en préparation", variant: "warning" },
+  envoyee: { label: "Déjà postulé", variant: "info" },
+  entretien: { label: "Entretien en cours", variant: "warning" },
+  acceptee: { label: "Candidature acceptée", variant: "success" },
+  refusee: { label: "Candidature refusée", variant: "danger" },
+};
+
+function applicationMeta(application: OffreApplication) {
+  return APPLICATION_META[application.status] ?? { label: "Dans votre suivi", variant: "default" as const };
+}
+
+/** « Déjà postulé · il y a 3 jours », ou « Poste similaire : déjà postulé » pour une autre annonce. */
+function applicationLabel(application: OffreApplication): string {
+  const { label } = applicationMeta(application);
+  return application.match === "similar" ? `Poste similaire : ${label.charAt(0).toLowerCase()}${label.slice(1)}` : label;
+}
+
+/** applied_at vient de datetime('now') de SQLite : heure UTC sans fuseau. */
+function appliedWhen(appliedAt: string): string {
+  return formatRelativeDate(/^\d{4}-\d{2}-\d{2} \d/.test(appliedAt) ? `${appliedAt.replace(" ", "T")}Z` : appliedAt);
 }
 
 /** Seuil de la puce de score, sauf arrivée par ?score=N (carte de l'accueil). */
@@ -49,6 +73,7 @@ export function OffresList({
   const [contracts, setContracts] = useState<Set<ContractCategory>>(() => new Set(initialVieOnly ? ["vie"] : []));
   const scoreThreshold = initialMinScore || DEFAULT_MIN_SCORE;
   const [minScore, setMinScore] = useState(initialMinScore > 0);
+  const [hideTracked, setHideTracked] = useState(false);
   const [sortBy, setSortBy] = useState<OffersSort>("smart");
   const [result, setResult] = useState(initialResult);
   const [page, setPage] = useState(1);
@@ -62,9 +87,9 @@ export function OffresList({
   const initialVieRef = useRef(initialVieOnly);
   const contractKey = [...contracts].sort().join(",");
   const vieFilter = contracts.has("vie");
-  const hasFilters = !!query || !!source || !!country || contracts.size > 0 || minScore;
-  const activeFilterCount = Number(!!source) + Number(!!country) + contracts.size + Number(minScore);
-  const { countries, sources, contractCounts } = result.facets;
+  const hasFilters = !!query || !!source || !!country || contracts.size > 0 || minScore || hideTracked;
+  const activeFilterCount = Number(!!source) + Number(!!country) + contracts.size + Number(minScore) + Number(hideTracked);
+  const { countries, sources, contractCounts, tracked } = result.facets;
   const shown = result.offers;
   const remaining = Math.max(0, result.total - shown.length);
   const selected = shown.find((offer) => offer.id === selectedId) ?? shown[0] ?? null;
@@ -115,6 +140,7 @@ export function OffresList({
     if (country) params.set("country", country);
     if (contractKey) params.set("contracts", contractKey);
     if (minScore) params.set("minScore", String(scoreThreshold));
+    if (hideTracked) params.set("hideTracked", "1");
     setLoading(true);
     setError(false);
     const timer = window.setTimeout(async () => {
@@ -135,10 +161,10 @@ export function OffresList({
       }
     }, page > 1 ? 0 : query ? 250 : 0);
     return () => { window.clearTimeout(timer); controller.abort(); };
-  }, [query, source, country, contractKey, minScore, scoreThreshold, sortBy, page, refreshKey]);
+  }, [query, source, country, contractKey, minScore, scoreThreshold, hideTracked, sortBy, page, refreshKey]);
 
   function reset() {
-    setQuery(""); setSource(""); setCountry(""); setContracts(new Set()); setMinScore(false); setSelectedId(null); setFiltersExpanded(false); setPage(1);
+    setQuery(""); setSource(""); setCountry(""); setContracts(new Set()); setMinScore(false); setHideTracked(false); setSelectedId(null); setFiltersExpanded(false); setPage(1);
   }
 
   function toggleContract(contract: ContractCategory) {
@@ -184,6 +210,11 @@ export function OffresList({
             </Chip>
           ))}
           <Chip active={minScore} onClick={() => { setMinScore(!minScore); setPage(1); }}>Score {scoreThreshold}+</Chip>
+          {(tracked > 0 || hideTracked) && (
+            <Chip active={hideTracked} onClick={() => { setHideTracked(!hideTracked); setPage(1); }}>
+              Masquer les offres suivies <span className="font-normal tabular-nums">{numberFormat.format(tracked)}</span>
+            </Chip>
+          )}
         </div>
 
         <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -242,10 +273,10 @@ function OfferRow({ offer, selected, onSelect }: { offer: OffreSummary; selected
   const classes = "offer-row group w-full items-start gap-3.5 border-b border-border border-l-[3px] p-4 text-left last:border-b-0 sm:gap-4 sm:p-5";
   return (
     <>
-      <button type="button" onClick={onSelect} aria-current={selected ? "true" : undefined} className={cn(classes, "hidden border-l-transparent xl:flex")}>
+      <button type="button" onClick={onSelect} aria-current={selected ? "true" : undefined} data-applied={offer.application ? "true" : undefined} className={cn(classes, "hidden border-l-transparent xl:flex")}>
         <OfferRowContent offer={offer} />
       </button>
-      <Link href={`/offres/${offer.id}`} className={cn(classes, "flex border-l-transparent xl:hidden")}>
+      <Link href={`/offres/${offer.id}`} data-applied={offer.application ? "true" : undefined} className={cn(classes, "flex border-l-transparent xl:hidden")}>
         <OfferRowContent offer={offer} />
       </Link>
     </>
@@ -263,6 +294,12 @@ function OfferRowContent({ offer }: { offer: OffreSummary }) {
         <span className="block font-medium leading-snug group-hover:text-accent">{offer.title}</span>
         <span className="mt-1 block text-small text-textSecondary">{offer.company || "Entreprise non précisée"} · {offer.location || offer.country || "Lieu non précisé"}</span>
         <span className="mt-3 flex flex-wrap items-center gap-1.5">
+          {offer.application && (
+            <Badge variant={applicationMeta(offer.application).variant} className="gap-1">
+              <CircleAlert className="h-3.5 w-3.5" aria-hidden="true" />
+              {applicationLabel(offer.application)}
+            </Badge>
+          )}
           {offer.posted_at && <span className="mr-1 text-caption text-textSecondary">{formatRelativeDate(offer.posted_at)}</span>}
           <Badge>{sourceLabels[offer.source] ?? offer.source}</Badge>
           {offer.contract_category !== "autre" && <Badge variant={offer.contract_category === "vie" ? "info" : "default"}>{CONTRACT_LABELS[offer.contract_category]}</Badge>}
@@ -272,6 +309,27 @@ function OfferRowContent({ offer }: { offer: OffreSummary }) {
       </span>
       <ArrowRight className="mt-1 h-4 w-4 shrink-0 text-textSecondary group-hover:text-accent xl:hidden" />
     </>
+  );
+}
+
+function ApplicationNotice({ application }: { application: OffreApplication }) {
+  const similar = application.match === "similar";
+  return (
+    <div role="note" className="mt-5 flex items-start gap-2.5 rounded-md border border-warning/40 bg-warning/[.08] px-3 py-2.5 text-small">
+      <CircleAlert className="mt-0.5 h-4 w-4 shrink-0 text-warning" aria-hidden="true" />
+      <p className="min-w-0 flex-1">
+        <span className="font-semibold">{applicationLabel(application)}</span>
+        <span className="text-textSecondary"> · {appliedWhen(application.applied_at)}</span>
+        <span className="mt-0.5 block text-textSecondary">
+          {similar
+            ? "Même entreprise et même intitulé qu'une candidature de votre suivi : vérifiez avant de postuler à nouveau."
+            : application.status === "en_cours"
+            ? "Cette offre est dans votre suivi, le dossier est en préparation."
+            : "Vous avez déjà postulé à cette offre : inutile de recommencer."}
+        </span>
+      </p>
+      <Link href="/candidatures" className="shrink-0 font-semibold text-accent hover:underline">Suivi</Link>
+    </div>
   );
 }
 
@@ -300,6 +358,7 @@ function OfferPreview({ offer }: { offer: OffreSummary }) {
           {offer.score ?? 0}<span className="mt-1 text-[11px] font-semibold">/ 100</span>
         </span>
       </div>
+      {offer.application && <ApplicationNotice application={offer.application} />}
       <div className="mt-5 flex flex-wrap gap-x-4 gap-y-2 border-b border-border pb-5 text-small text-textSecondary">
         {(offer.location || offer.country) && <span className="inline-flex items-center gap-1.5"><MapPin className="h-4 w-4" /> {offer.location || offer.country}</span>}
         {offer.posted_at && <span className="inline-flex items-center gap-1.5"><CalendarDays className="h-4 w-4" /> {formatRelativeDate(offer.posted_at)}</span>}

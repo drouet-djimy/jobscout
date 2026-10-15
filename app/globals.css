@@ -306,6 +306,8 @@ button, select, summary { cursor: pointer; }
   }
   .metric-card:hover { border-color: rgb(var(--accent-rgb) / .3); }
   .offer-row { transition: background 180ms, border-color 180ms; }
+  /* Offre déjà dans le suivi des candidatures : filet et fond orangés, pour ne pas postuler deux fois. */
+  .offer-row[data-applied="true"] { background: rgb(var(--warning-rgb) / .07); border-left-color: var(--warning); }
   .offer-row:hover { background: var(--accent-soft); }
   .offer-row[aria-current="true"] { background: var(--accent-soft); border-left-color: var(--accent); }
   /* Pastille de score. Bleu par défaut ; `data-tone` (voir scoreColor dans

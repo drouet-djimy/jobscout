@@ -78,6 +78,8 @@ export async function POST(req: NextRequest) {
           title: o.title,
           company: o.company,
           country: o.country,
+          lat: o.lat,
+          lon: o.lon,
           description_text: o.description_text,
           contract_type: o.contract_type,
         })

@@ -41,6 +41,19 @@ export const LanguageSchema = z.object({
 });
 export type Language = z.infer<typeof LanguageSchema>;
 
+// Ville cible : la recherche porte sur un rayon autour de ses coordonnées.
+// Une ville restreint son pays à cette zone (voir lib/geo/zones.ts).
+export const TargetCitySchema = z.object({
+  name: z.string().min(1).max(120),
+  region: z.string().max(120).nullable().optional(),
+  country: z.string().min(1).max(80), // nom français canonique (comme target_countries)
+  country_code: z.string().length(2),
+  lat: z.number().min(-90).max(90),
+  lon: z.number().min(-180).max(180),
+  radius_km: z.number().int().min(1).max(200).default(30),
+});
+export type TargetCity = z.infer<typeof TargetCitySchema>;
+
 export const ProfileSchema = z.object({
   id: z.number().optional(),
   full_name: z.string().nullable().optional(),
@@ -53,6 +66,7 @@ export const ProfileSchema = z.object({
   raw_cv_text: z.string().nullable().optional(),
   sectors: z.array(z.string()).default([]),
   target_countries: z.array(z.string()).default([]),
+  target_cities: z.array(TargetCitySchema).max(20).default([]),
   sources_enabled: z.array(z.string()).default([]),
   preferred_contracts: z
     .array(z.enum(["cdi", "cdd", "vie", "stage", "alternance"]))

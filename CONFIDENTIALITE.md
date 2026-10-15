@@ -97,6 +97,7 @@ Les sources suspendues (APEC, Civiweb) ne sont jamais interrogées, même si ell
 
 - vos secteurs, utilisés comme mots-clés de recherche ;
 - le pays visé, selon le site ;
+- si vous ciblez des villes : le nom de chaque ville (ou ses coordonnées, pour Welcome to the Jungle, ou son code commune, pour France Travail) et le rayon choisi ;
 - votre adresse IP ;
 - des en-têtes techniques. Le plus souvent, JobScout se présente comme un navigateur Chrome ordinaire sous Windows, en français. Les exceptions : l'index de Welcome to the Jungle et l'API de France Travail, pour lesquels JobScout n'imite pas de navigateur.
 
@@ -119,6 +120,15 @@ Ces en-têtes ne contiennent aucune donnée sur vous. Leur portée au regard des
 **LinkedIn** est interrogé par un navigateur Chromium sans fenêtre, sans compte et sans profil enregistré. Les cookies que LinkedIn dépose pendant le scan restent en mémoire. Ils sont effacés à la fin du scan.
 
 Chaque site voit votre adresse IP et vos requêtes, et les traite selon sa propre politique. Il peut aussi limiter ou bloquer l'accès.
+
+### 4.2 bis Les villes cibles : géocodage
+
+Ce cas se présente seulement si vous ajoutez des villes dans Profil › Recherche › Villes et rayon (ou à l'étape Préférences de l'onboarding). Sans ville, rien de ce qui suit n'a lieu.
+
+- **Quand vous cherchez une ville**, le texte tapé dans le champ « Ajouter une ville » part vers `geocoding-api.open-meteo.com` (service de géocodage d'Open-Meteo, données GeoNames), qui renvoie les villes correspondantes et leurs coordonnées.
+- **Pendant un scan**, JobScout situe les offres dont la source ne donne pas les coordonnées. Le lieu de l'offre (par exemple « Lyon 3e Arrondissement ») part vers `geo.api.gouv.fr` (référentiel des communes de l'État) pour la France, et vers `geocoding-api.open-meteo.com` pour les autres pays. Pour chaque ville française ciblée, `geo.api.gouv.fr` reçoit aussi ses coordonnées, afin d'obtenir le code commune qu'exige France Travail.
+
+Ces services reçoivent des noms de lieux et votre adresse IP, rien d'autre : ni votre nom, ni votre CV. Aucun compte ni clé n'est utilisé. Les réponses sont gardées dans la base locale (table `geocache`) : un même lieu n'est demandé qu'une fois.
 
 ### 4.3 France Travail : vos identifiants d'API
 

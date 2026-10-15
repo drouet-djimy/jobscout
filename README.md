@@ -79,6 +79,8 @@ L'app démarre sur http://127.0.0.1:3000 (écoute limitée à la machine locale,
 
 **Avant d'activer une source, lisez les [conditions d'utilisation](CGU.md) (sections 5 et 6)** : les conditions de Welcome to the Jungle, HelloWork, Talent.com et LinkedIn interdisent l'extraction automatisée. C'est pourquoi, depuis la 3.4.13, seule France Travail est cochée d'office. Chaque source s'active ou se désactive dans Profil › Recherche › Sources (ou à l'étape Préférences de l'onboarding). Une source suspendue n'est jamais interrogée, même si elle est restée cochée dans un ancien profil. Une source hors périmètre géographique (ex. HelloWork quand le profil ne cible pas la France) est automatiquement sautée. La disponibilité des sources dépend des sites tiers (anti-bot, changements d'API) ; une source en échec est signalée dans le journal du scan.
 
+**Villes et rayon.** En plus des pays, le profil peut cibler des villes avec un rayon (5 à 100 km), dans Profil › Recherche › Villes et rayon. Une ville restreint son pays à sa zone ; un pays coché sans ville reste couvert en entier (ex. pays « France, Suisse » + « Lyon, 30 km » → toute la Suisse et la région lyonnaise). Chaque source utilise sa propre recherche par lieu : France Travail (code commune + rayon), HelloWork (ville + rayon), LinkedIn (ville + distance), Welcome to the Jungle (recherche géographique de l'index) et Talent.com (ville, avec son propre rayon). Pendant le scan, les offres sans coordonnées sont géocodées (`geo.api.gouv.fr` pour la France, Open-Meteo ailleurs, résultats en cache), et celles nettement hors zone (au-delà du rayon + max(10 km, 50 % du rayon)) ne sont pas enregistrées. Un lieu introuvable ne fait jamais écarter une offre. Code : `lib/geo/`.
+
 WTTJ est interrogée avec la clé de recherche (lecture seule) qu'utilise l'interface du site. Si elle cesse de fonctionner, décochez la source.
 
 ## Scoring des offres (local, déterministe, gratuit)
@@ -87,7 +89,7 @@ WTTJ est interrogée avec la clé de recherche (lecture seule) qu'utilise l'inte
 
 - **Secteur** (30 %) — titre et description comparés aux secteurs cibles du profil
 - **Compétences** (50 %) — une compétence ancrée dans une expérience pèse davantage qu'une compétence simplement listée
-- **Pays** (20 %) — 100 si le pays de l'offre fait partie des pays cibles, 0 sinon ; neutre si l'offre n'a pas de pays ou si aucun pays cible n'est déclaré
+- **Lieu** (20 %) — avec des villes cibles : 100 dans le rayon, 60 juste au-delà, 0 nettement hors zone, neutre si le lieu de l'offre est inconnu. Pour les pays couverts entièrement : 100 si le pays de l'offre en fait partie, 0 sinon ; neutre si l'offre n'a pas de pays ou si aucune cible n'est déclarée. La distance à la ville la plus proche apparaît dans la raison du score
 - **Contrat** (±10) — selon les contrats recherchés du profil (`preferred_contracts`, par défaut CDI et CDD) : +10 si le contrat de l'offre en fait partie, neutre s'il est inconnu, −6 s'il est identifié mais non recherché
 - **Bonus Langue** (jusqu'à +8) — +8 si l'offre est rédigée dans une langue maîtrisée (B2+) ; +2,4 si elle n'est pas en anglais mais que l'utilisateur maîtrise l'anglais
 - **Bonus Durée V.I.E** (jusqu'à +5, V.I.E uniquement) — +5 pour 12–24 mois, +3 pour 6–11 mois

@@ -2,6 +2,8 @@ import "server-only";
 import type { Scraper, ScrapedOffre, ScrapeCriteria, ProgressEvent } from "./base";
 import { htmlToText } from "./base";
 import { detectVie } from "@/lib/vie";
+import { citiesIn } from "@/lib/geo/zones";
+import { communeCode } from "@/lib/geo/geocode";
 import {
   parseDocument,
   firstMatchHtml,
@@ -28,6 +30,9 @@ const DETAIL_SELECTORS = [
   ".media-body",
   "article",
 ];
+
+/** Zone de recherche : une commune (code INSEE) et un rayon en km ; null = toute la France. */
+type Zone = { commune: string; rayon: number } | null;
 
 let cachedToken: { token: string; expires: number } | null = null;
 
@@ -114,13 +119,17 @@ function apiJobToScraped(job: FtApiJob): ScrapedOffre | null {
   };
 }
 
-async function fetchApi(keywords: string, start: number, size: number): Promise<FtApiJob[]> {
+async function fetchApi(keywords: string, start: number, size: number, zone: Zone): Promise<FtApiJob[]> {
   const token = await getToken();
   if (!token) return [];
   const params = new URLSearchParams({
     motsCles: keywords,
     range: `${start}-${start + size - 1}`,
   });
+  if (zone) {
+    params.set("commune", zone.commune);
+    params.set("distance", String(zone.rayon));
+  }
   const res = await fetch(`${API_BASE}/offres/search?${params}`, {
     headers: { accept: "application/json", authorization: `Bearer ${token}` },
   });
@@ -176,12 +185,16 @@ function parseHtmlSearch(html: string): HtmlCard[] {
   return out;
 }
 
-async function fetchHtmlPage(keywords: string, page: number): Promise<HtmlCard[]> {
+async function fetchHtmlPage(keywords: string, page: number, zone: Zone): Promise<HtmlCard[]> {
   const params = new URLSearchParams({
     motsCles: keywords,
     offresPartenaires: "true",
     page: String(page),
   });
+  if (zone) {
+    params.set("lieux", zone.commune);
+    params.set("rayon", String(zone.rayon));
+  }
   const res = await fetch(`${SEARCH_PAGE}?${params}`, { headers: BROWSER_HEADERS });
   if (!res.ok) throw new Error(`France Travail HTTP ${res.status}`);
   return parseHtmlSearch(await res.text());
@@ -243,16 +256,34 @@ export const francetravailScraper: Scraper = {
     const max = criteria.maxOffres ?? 50;
     const queries = criteria.sectors.length ? criteria.sectors : [""];
 
+    // Villes françaises ciblées : une recherche par commune et rayon. Sinon toute la France.
+    // Commune introuvable (service injoignable) : recherche nationale, l'orchestrateur
+    // écartera ensuite les offres hors zone.
+    const zones: Zone[] = [];
+    for (const city of citiesIn(criteria.cities ?? [], "FR")) {
+      const commune = await communeCode(city);
+      const zone: Zone = commune ? { commune, rayon: city.radius_km } : null;
+      if (!zones.some((z) => z?.commune === zone?.commune && z?.rayon === zone?.rayon)) zones.push(zone);
+    }
+    if (!zones.length) zones.push(null);
+    // Budget réparti entre les zones, pour qu'une grande ville n'épuise pas tout.
+    const perZone = Math.max(10, Math.ceil(max / zones.length));
+    const searches = zones.flatMap((zone) => queries.map((q) => ({ q, zone })));
+
     // Stratégie 1 : API officielle (descriptions complètes, aucun fetch détail nécessaire)
     const apiOffres = new Map<string, ScrapedOffre>();
-    for (const q of queries) {
+    const apiZoneCount = new Map<Zone, number>();
+    for (const { q, zone } of searches) {
       let start = 0;
-      while (apiOffres.size < max && start < 150) {
-        const jobs = await fetchApi(q, start, 50);
+      while (apiOffres.size < max && (apiZoneCount.get(zone) ?? 0) < perZone && start < 150) {
+        const jobs = await fetchApi(q, start, 50, zone);
         if (!jobs.length) break;
         for (const j of jobs) {
           const o = apiJobToScraped(j);
-          if (o && !apiOffres.has(o.source_id)) apiOffres.set(o.source_id, o);
+          if (o && !apiOffres.has(o.source_id)) {
+            apiOffres.set(o.source_id, o);
+            apiZoneCount.set(zone, (apiZoneCount.get(zone) ?? 0) + 1);
+          }
         }
         if (jobs.length < 50) break;
         start += 50;
@@ -276,12 +307,17 @@ export const francetravailScraper: Scraper = {
 
     // Stratégie 2 : HTML fallback
     const seen = new Map<string, HtmlCard>();
-    for (const q of queries) {
-      for (let page = 1; page <= 3 && seen.size < max; page++) {
+    const htmlZoneCount = new Map<Zone, number>();
+    for (const { q, zone } of searches) {
+      for (let page = 1; page <= 3 && seen.size < max && (htmlZoneCount.get(zone) ?? 0) < perZone; page++) {
         try {
-          const cards = await fetchHtmlPage(q, page);
+          const cards = await fetchHtmlPage(q, page, zone);
           if (!cards.length) break;
-          for (const c of cards) if (!seen.has(c.id)) seen.set(c.id, c);
+          for (const c of cards) {
+            if (seen.has(c.id)) continue;
+            seen.set(c.id, c);
+            htmlZoneCount.set(zone, (htmlZoneCount.get(zone) ?? 0) + 1);
+          }
           if (cards.length < 10) break;
           await sleep(1200);
         } catch {
